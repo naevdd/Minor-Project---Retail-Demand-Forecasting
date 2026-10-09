@@ -1,0 +1,12 @@
+Metric,Value
+Rows,1017209
+Stores,1115
+Date min,2013-01-01
+Date max,2015-07-31
+Duplicate rows,0
+Closed-day rows,172817
+Open-day zero-sales rows,54
+Sales IQR outlier rows (open days),30769
+Sales IQR lower bound,0.0
+Sales IQR upper bound,13611.5
+Missing cells,0
