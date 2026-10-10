@@ -1,0 +1,3 @@
+Model,Scope,FitSeconds,ForecastSeconds,TuningSeconds,Artifact
+XGBOOST,Pooled across all stores,6.647473699995317,300.2381154994946,23.19024540000828,models\ml\xgboost_model.json
+LIGHTGBM,Pooled across all stores,2.6142686000093818,180.24275339988526,18.53719689999707,models\ml\lightgbm_model.txt

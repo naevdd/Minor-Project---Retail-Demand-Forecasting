@@ -1,0 +1,11 @@
+ModelA,ModelB,MeanMAEDifference_A_minus_B,PairedStores,RawPValue,HolmAdjustedPValue,Test
+ARIMA,LIGHTGBM,649.1297021334909,20,0.0001049041748046875,0.0007343292236328125,Paired Wilcoxon signed-rank on store MAE averaged over folds; Holm-adjusted
+ARIMA,LSTM,479.32579481117017,20,5.7220458984375e-06,5.14984130859375e-05,Paired Wilcoxon signed-rank on store MAE averaged over folds; Holm-adjusted
+ARIMA,PROPHET,457.9637515238286,20,3.814697265625e-06,3.814697265625e-05,Paired Wilcoxon signed-rank on store MAE averaged over folds; Holm-adjusted
+ARIMA,XGBOOST,671.0913227141888,20,2.6702880859375e-05,0.000213623046875,Paired Wilcoxon signed-rank on store MAE averaged over folds; Holm-adjusted
+LIGHTGBM,LSTM,-169.80390732232084,20,0.04844093322753906,0.1599578857421875,Paired Wilcoxon signed-rank on store MAE averaged over folds; Holm-adjusted
+LIGHTGBM,PROPHET,-191.16595060966242,20,0.039989471435546875,0.1599578857421875,Paired Wilcoxon signed-rank on store MAE averaged over folds; Holm-adjusted
+LIGHTGBM,XGBOOST,21.961620580697904,20,0.24548721313476562,0.49097442626953125,Paired Wilcoxon signed-rank on store MAE averaged over folds; Holm-adjusted
+LSTM,PROPHET,-21.362043287341596,20,0.47490501403808594,0.49097442626953125,Paired Wilcoxon signed-rank on store MAE averaged over folds; Holm-adjusted
+LSTM,XGBOOST,191.76552790301875,20,0.012079238891601562,0.07247543334960938,Paired Wilcoxon signed-rank on store MAE averaged over folds; Holm-adjusted
+PROPHET,XGBOOST,213.12757119036033,20,0.021484375,0.107421875,Paired Wilcoxon signed-rank on store MAE averaged over folds; Holm-adjusted

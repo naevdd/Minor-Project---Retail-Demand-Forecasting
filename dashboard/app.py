@@ -30,6 +30,11 @@ dl_path = os.path.join(BASE_DIR, "data/features/dl_results.json")
 common_path = os.path.join(BASE_DIR, "data/processed/common_benchmark_stores.json")
 xgb_importance_path = os.path.join(BASE_DIR, "data/processed/xgboost_feature_importance.csv")
 lgb_importance_path = os.path.join(BASE_DIR, "data/processed/lightgbm_feature_importance.csv")
+rolling_metrics_path = os.path.join(BASE_DIR, "data/processed/rolling_origin_metrics.csv")
+significance_path = os.path.join(BASE_DIR, "data/processed/significance_tests.csv")
+runtime_path = os.path.join(BASE_DIR, "data/processed/runtime_summary.csv")
+complexity_path = os.path.join(BASE_DIR, "data/processed/accuracy_complexity_summary.csv")
+metadata_path = os.path.join(BASE_DIR, "data/processed/pipeline_metadata.json")
 
 
 df_metrics = pd.read_csv(metrics_path) if os.path.exists(metrics_path) else pd.DataFrame()
@@ -63,6 +68,11 @@ MODEL_CATEGORIES = {
     "LSTM": "🧠 Deep Learning",
 }
 
+MODEL_FILL_COLORS = {
+    "ARIMA": "rgba(99,110,250,0.14)",
+    "PROPHET": "rgba(239,85,59,0.14)",
+}
+
 MODEL_COLORS = {
     "ARIMA": "#636EFA",
     "PROPHET": "#EF553B",
@@ -72,6 +82,13 @@ MODEL_COLORS = {
 }
 
 st.title("📈 Retail Demand Forecasting")
+
+if not os.path.exists(metadata_path):
+    st.warning(
+        "The included forecast files predate the latest pipeline corrections. "
+        "Re-run `python run_pipeline.py` before treating the displayed scores as final. "
+        "Until then, this dashboard is only a view of the bundled demonstration outputs."
+    )
 
 if df_metrics.empty:
     st.warning("No metrics found. Run the modeling and evaluation pipeline first.")
@@ -110,12 +127,21 @@ def get_result(store, model):
     predictions = data.get(pred_key, [])
     if not dates or not (len(dates) == len(actual) == len(predictions)):
         return None
+    lower_key, upper_key = f"{pred_key}_lower", f"{pred_key}_upper"
+    lower = data.get(lower_key, [None] * len(dates))
+    upper = data.get(upper_key, [None] * len(dates))
+    if len(lower) != len(dates):
+        lower = [None] * len(dates)
+    if len(upper) != len(dates):
+        upper = [None] * len(dates)
 
     return pd.DataFrame(
         {
             "Date": pd.to_datetime(dates),
             "Actual": pd.to_numeric(actual, errors="coerce"),
             "Prediction": pd.to_numeric(predictions, errors="coerce"),
+            "Lower": pd.to_numeric(pd.Series(lower), errors="coerce"),
+            "Upper": pd.to_numeric(pd.Series(upper), errors="coerce"),
         }
     ).sort_values("Date")
 
@@ -249,8 +275,8 @@ st.sidebar.markdown(
 )
 
 # --- MAIN CONTENT ---
-tab1, tab2, tab3 = st.tabs(
-    ["📈 Forecast Explorer", "📊 Aggregate Benchmarks", "🔍 Feature Importance"]
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["📈 Forecast Explorer", "📊 Aggregate Benchmarks", "🔍 Feature Importance", "🧪 Validation & Runtime"]
 )
 
 
@@ -311,6 +337,24 @@ with tab1:
                 continue
             frame = model_frames[model]
             frame = frame[frame["Date"].isin(common_dates)]
+            if frame["Lower"].notna().any() and frame["Upper"].notna().any():
+                fig.add_trace(
+                    go.Scatter(
+                        x=frame["Date"], y=frame["Upper"], mode="lines",
+                        line=dict(width=0, color=MODEL_COLORS.get(model)),
+                        name=f"{model} 95% interval", showlegend=False,
+                        hovertemplate="Upper interval: %{y:.0f}<extra></extra>",
+                    )
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=frame["Date"], y=frame["Lower"], mode="lines",
+                        line=dict(width=0, color=MODEL_COLORS.get(model)),
+                        fill="tonexty", fillcolor=MODEL_FILL_COLORS.get(model, "rgba(100,100,100,0.12)"),
+                        name=f"{model} 95% interval", showlegend=True,
+                        hovertemplate="Lower interval: %{y:.0f}<extra></extra>",
+                    )
+                )
             fig.add_trace(
                 go.Scatter(
                     x=frame["Date"],
@@ -332,6 +376,27 @@ with tab1:
         st.caption(
             f"Common validation observations: {common_dates[0].date()} to "
             f"{common_dates[-1].date()} ({len(common_dates)} observations)."
+        )
+
+        export_frame = actual_frame.rename(columns={"Actual": "Actual_Sales"}).copy()
+        for model in selected_models:
+            if model not in model_frames:
+                continue
+            model_export = model_frames[model]
+            model_export = model_export[model_export["Date"].isin(common_dates)][
+                ["Date", "Prediction", "Lower", "Upper"]
+            ].rename(columns={
+                "Prediction": f"{model}_Prediction",
+                "Lower": f"{model}_Lower_95pct",
+                "Upper": f"{model}_Upper_95pct",
+            })
+            export_frame = export_frame.merge(model_export, on="Date", how="left")
+        st.download_button(
+            f"Download Store {store} forecast comparison (CSV)",
+            data=export_frame.to_csv(index=False).encode("utf-8"),
+            file_name=f"store_{store}_forecast_comparison.csv",
+            mime="text/csv",
+            key=f"download_forecast_{store}",
         )
 
         st.markdown("**Selected-range error metrics**")
@@ -374,6 +439,13 @@ with tab2:
         agg_df[["Category", "Model", "MAPE", "RMSE", "MAE"]],
         use_container_width=True,
         hide_index=True,
+    )
+    st.download_button(
+        "Download common-store benchmark (CSV)",
+        data=agg_df.to_csv(index=False).encode("utf-8"),
+        file_name="common_store_benchmark.csv",
+        mime="text/csv",
+        key="download_common_benchmark",
     )
 
     coverage = (
@@ -449,3 +521,78 @@ with tab3:
                 labels={"ImportancePct": "Importance (%)"},
             )
             st.plotly_chart(fig, use_container_width=True)
+
+
+with tab4:
+    st.header("Rolling-Origin Validation & Model Complexity")
+    st.caption(
+        "Rolling-origin results use three expanding-window folds on the representative store sample. "
+        "The paired tests compare per-store MAE averaged across folds and apply a Holm correction."
+    )
+
+    rolling_metrics = pd.read_csv(rolling_metrics_path) if os.path.exists(rolling_metrics_path) else pd.DataFrame()
+    if rolling_metrics.empty:
+        st.info("Rolling-origin outputs are not available yet. Run the complete pipeline to generate them.")
+    else:
+        overall_cv = rolling_metrics[rolling_metrics["Fold"].astype(str).eq("All")].copy()
+        st.subheader("Overall rolling-origin metrics")
+        if not overall_cv.empty:
+            st.dataframe(
+                overall_cv[["Model", "RMSE", "MAE", "MAPE", "Stores", "ForecastObservations"]]
+                .sort_values("MAPE"),
+                use_container_width=True, hide_index=True,
+            )
+            st.download_button(
+                "Download rolling-origin metrics (CSV)", data=rolling_metrics.to_csv(index=False).encode("utf-8"),
+                file_name="rolling_origin_metrics.csv", mime="text/csv", key="download_rolling_metrics",
+            )
+        st.subheader("Fold-by-fold stability")
+        fold_cv = rolling_metrics[~rolling_metrics["Fold"].astype(str).eq("All")].copy()
+        if not fold_cv.empty:
+            st.dataframe(
+                fold_cv[["Fold", "Model", "RMSE", "MAE", "MAPE", "Stores"]]
+                .sort_values(["Fold", "Model"]),
+                use_container_width=True, hide_index=True,
+            )
+
+    st.subheader("Pairwise significance tests")
+    if os.path.exists(significance_path):
+        significance = pd.read_csv(significance_path)
+        if significance.empty:
+            st.info("No pairwise significance tests were generated; check common fold/store coverage.")
+        else:
+            st.dataframe(
+                significance[["ModelA", "ModelB", "MeanMAEDifference_A_minus_B", "PairedStores", "RawPValue", "HolmAdjustedPValue"]],
+                use_container_width=True, hide_index=True,
+            )
+            st.download_button(
+                "Download significance tests (CSV)", data=significance.to_csv(index=False).encode("utf-8"),
+                file_name="significance_tests.csv", mime="text/csv", key="download_significance",
+            )
+            st.caption(
+                "A negative MAE difference means Model A has lower mean absolute error than Model B. "
+                "Use Holm-adjusted p-values; statistical evidence is limited to the sampled stores and folds."
+            )
+    else:
+        st.info("Significance test output is generated by the evaluation stage after rolling-origin validation.")
+
+    st.subheader("Measured training and inference time")
+    runtime = pd.read_csv(runtime_path) if os.path.exists(runtime_path) else pd.DataFrame()
+    if runtime.empty:
+        st.info("Runtime measurements are not available yet.")
+    else:
+        st.dataframe(runtime, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download runtime summary (CSV)", data=runtime.to_csv(index=False).encode("utf-8"),
+            file_name="runtime_summary.csv", mime="text/csv", key="download_runtime",
+        )
+        st.caption("Times are from the recorded run and depend on the host hardware and runtime configuration.")
+
+    if os.path.exists(complexity_path):
+        st.subheader("Accuracy–complexity summary")
+        complexity = pd.read_csv(complexity_path)
+        st.dataframe(complexity, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download accuracy–complexity summary (CSV)", data=complexity.to_csv(index=False).encode("utf-8"),
+            file_name="accuracy_complexity_summary.csv", mime="text/csv", key="download_complexity",
+        )

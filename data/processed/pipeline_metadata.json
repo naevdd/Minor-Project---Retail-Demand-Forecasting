@@ -1,0 +1,20 @@
+{
+  "pipeline_version": 2,
+  "evaluated_at_utc": "2026-10-10T13:33:24.506307+00:00",
+  "latest_dataset_date": "2015-07-31",
+  "final_holdout_cutoff": "2015-06-19",
+  "validated_model_manifests": true,
+  "model_output_date": "2015-07-31",
+  "model_output_split_date": "2015-06-19",
+  "fixed_holdout_models": [
+    "ARIMA",
+    "LIGHTGBM",
+    "LSTM",
+    "PROPHET",
+    "XGBOOST"
+  ],
+  "common_benchmark_stores": 20,
+  "rolling_origin_available": true,
+  "significance_tests_available": true,
+  "runtime_summary_available": true
+}

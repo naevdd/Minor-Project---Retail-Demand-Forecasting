@@ -1,0 +1,7 @@
+Store,Model,Candidate,Parameters,TuningRMSE,TuningSeconds,Error
+ALL,XGBOOST,1,"{""colsample_bytree"": 0.9, ""learning_rate"": 0.1, ""max_depth"": 4, ""n_estimators"": 100, ""subsample"": 0.9}",1353.5517224769255,6.412734300014563,
+ALL,XGBOOST,2,"{""colsample_bytree"": 0.9, ""learning_rate"": 0.05, ""max_depth"": 6, ""n_estimators"": 150, ""subsample"": 0.9}",1251.6677119031842,8.349276799999643,
+ALL,XGBOOST,3,"{""colsample_bytree"": 0.8, ""learning_rate"": 0.05, ""max_depth"": 8, ""n_estimators"": 100, ""subsample"": 0.8}",1226.7191541843808,8.25388999999268,
+ALL,LIGHTGBM,1,"{""colsample_bytree"": 0.9, ""learning_rate"": 0.1, ""max_depth"": 6, ""n_estimators"": 100, ""num_leaves"": 31, ""subsample"": 0.9}",1228.1861663185525,5.193500599998515,
+ALL,LIGHTGBM,2,"{""colsample_bytree"": 0.9, ""learning_rate"": 0.05, ""max_depth"": 8, ""n_estimators"": 150, ""num_leaves"": 31, ""subsample"": 0.9}",1270.229459070714,6.761556299985386,
+ALL,LIGHTGBM,3,"{""colsample_bytree"": 0.8, ""learning_rate"": 0.05, ""max_depth"": -1, ""n_estimators"": 100, ""num_leaves"": 63, ""subsample"": 0.8}",1308.2598781850531,6.424844600027427,

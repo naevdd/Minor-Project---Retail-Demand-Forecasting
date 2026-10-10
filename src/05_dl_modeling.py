@@ -1,22 +1,29 @@
-import pandas as pd
-import numpy as np
-import os
+"""Per-store LSTM forecasting with aligned recursive inference and checkpoints."""
+from pathlib import Path
 import json
+import time
+
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import MinMaxScaler
+from torch.utils.data import DataLoader, TensorDataset
 
-# Use GPU if available, otherwise fall back to CPU
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+from modeling_common import get_model_features, update_sales_features
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {DEVICE}")
 VAL_DAYS = 42
 SEQ_LENGTH = 30
+MAX_EPOCHS = 50
+PATIENCE = 5
+MODEL_VERSION = 2
 
 
 class LSTMForecaster(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers, output_dim):
+    def __init__(self, input_dim, hidden_dim=64, num_layers=2, output_dim=1):
         super().__init__()
         self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
         self.fc = nn.Linear(hidden_dim, output_dim)
@@ -29,79 +36,62 @@ class LSTMForecaster(nn.Module):
 def create_sequences(data, target, dates, seq_length):
     xs, ys, ds = [], [], []
     for i in range(len(data) - seq_length):
-        xs.append(data[i : i + seq_length])
+        xs.append(data[i:i + seq_length])
         ys.append(target[i + seq_length])
         ds.append(dates[i + seq_length])
-    return np.array(xs), np.array(ys), np.array(ds)
+    return np.asarray(xs), np.asarray(ys), np.asarray(ds)
 
 
-def _update_sales_features(row, history):
-    """Create validation-time lag/rolling features using only observed/predicted history."""
-    row = row.copy()
-    history = pd.Series(history, dtype=float)
-
-    for col, lag in {
-        "Sales_Lag_1": 1,
-        "Sales_Lag_7": 7,
-        "Sales_Lag_14": 14,
-        "Sales_Lag_30": 30,
-    }.items():
-        row[col] = float(history.iloc[-lag]) if len(history) >= lag else 0.0
-
-    for col, window, stat in [
-        ("Sales_RollMean_7", 7, "mean"),
-        ("Sales_RollStd_7", 7, "std"),
-        ("Sales_RollMean_14", 14, "mean"),
-        ("Sales_RollStd_14", 14, "std"),
-    ]:
-        if len(history) == 0:
-            value = 0.0
-        else:
-            values = history.iloc[-window:]
-            value = values.mean() if stat == "mean" else values.std()
-            if pd.isna(value):
-                value = 0.0
-        row[col] = float(value)
-
-    return row
+def _checkpoint_model(model, scaler_x, scaler_y, features, store_id, artifact_dir, split_date):
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    weights_path = artifact_dir / f"store_{int(store_id):04d}.pt"
+    torch.save({
+        "model_state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
+        "input_dim": len(features), "hidden_dim": 64, "num_layers": 2,
+        "sequence_length": SEQ_LENGTH, "features": features,
+        "store_id": int(store_id), "split_date": pd.Timestamp(split_date).strftime("%Y-%m-%d"),
+        "model_version": MODEL_VERSION,
+    }, weights_path)
+    scaler_metadata = {
+        "store_id": int(store_id), "features": features,
+        "x_scale": scaler_x.scale_.tolist(), "x_min": scaler_x.min_.tolist(),
+        "x_data_min": scaler_x.data_min_.tolist(), "x_data_max": scaler_x.data_max_.tolist(),
+        "y_scale": scaler_y.scale_.tolist(), "y_min": scaler_y.min_.tolist(),
+        "y_data_min": scaler_y.data_min_.tolist(), "y_data_max": scaler_y.data_max_.tolist(),
+    }
+    (artifact_dir / f"store_{int(store_id):04d}_scalers.json").write_text(
+        json.dumps(scaler_metadata, indent=2), encoding="utf-8"
+    )
+    return weights_path
 
 
 def train_store(
-    df_store,
-    features,
-    seq_length=SEQ_LENGTH,
-    val_days=VAL_DAYS,
-    max_epochs=50,
-    patience=5,
+    df_store: pd.DataFrame,
+    features: list[str],
+    split_date,
+    forecast_end=None,
+    seq_length: int = SEQ_LENGTH,
+    max_epochs: int = MAX_EPOCHS,
+    patience: int = PATIENCE,
+    artifact_dir: Path | None = None,
 ):
-    """
-    Train one LSTM with the common calendar validation cutoff.
-
-    The final test period is rolled forward recursively: after the first
-    prediction, that prediction—not the future actual—is used to construct
-    subsequent lag/rolling features. This makes the LSTM forecast horizon
-    comparable with the blind multi-step classical forecasts.
-    """
-    df_store = df_store.sort_values("Date").copy()
-    df_store = df_store[df_store["Open"] == 1].copy()
-
-    if len(df_store) < seq_length + val_days + 20:
+    """Fit one LSTM to a global cutoff; predict each validation row before appending it to history."""
+    started_total = time.perf_counter()
+    frame = df_store.sort_values("Date").copy()
+    if "Open" in frame.columns:
+        frame = frame[frame["Open"].eq(1)]
+    if forecast_end is not None:
+        frame = frame[frame["Date"] <= pd.Timestamp(forecast_end)]
+    train_df = frame[frame["Date"] <= pd.Timestamp(split_date)].copy()
+    test_df = frame[frame["Date"] > pd.Timestamp(split_date)].copy()
+    if test_df.empty or len(train_df) < seq_length + 60:
         return None
 
-    split_date = df_store["Date"].max() - pd.Timedelta(days=val_days)
-    train_df = df_store[df_store["Date"] <= split_date].copy()
-    test_df = df_store[df_store["Date"] > split_date].copy()
-
-    if len(test_df) == 0 or len(train_df) <= seq_length + 10:
-        return None
-
-    # Internal validation is carved from the training period so the final
-    # evaluation period remains untouched by early stopping.
+    # Early stopping uses only the pre-test training window.
     internal_val_days = min(42, max(14, len(train_df) // 10))
     internal_split = train_df["Date"].max() - pd.Timedelta(days=internal_val_days)
     fit_df = train_df[train_df["Date"] <= internal_split].copy()
-
-    if len(fit_df) <= seq_length:
+    if len(fit_df) <= seq_length + 10:
         return None
 
     scaler_x = MinMaxScaler()
@@ -109,165 +99,184 @@ def train_store(
     scaler_x.fit(fit_df[features])
     scaler_y.fit(fit_df[["Sales"]])
 
-    # Training/early-validation sequences use only the historical training
-    # period. The scaler itself is fitted strictly on fit_df.
-    train_X_scaled = scaler_x.transform(train_df[features])
-    train_y_scaled = scaler_y.transform(train_df[["Sales"]])
-    train_dates = train_df["Date"].to_numpy()
-    X_seq, y_seq, seq_dates = create_sequences(
-        train_X_scaled, train_y_scaled, train_dates, seq_length
-    )
-
-    fit_mask = seq_dates <= np.datetime64(internal_split)
-    early_mask = seq_dates > np.datetime64(internal_split)
-
-    X_fit_np = X_seq[fit_mask]
-    y_fit_np = y_seq[fit_mask]
-    X_early_np = X_seq[early_mask]
-    y_early_np = y_seq[early_mask]
-
+    train_scaled = scaler_x.transform(train_df[features])
+    target_scaled = scaler_y.transform(train_df[["Sales"]])
+    seq_dates = train_df["Date"].to_numpy()
+    X_seq, y_seq, target_dates = create_sequences(train_scaled, target_scaled, seq_dates, seq_length)
+    fit_mask = target_dates <= np.datetime64(internal_split)
+    early_mask = target_dates > np.datetime64(internal_split)
+    X_fit_np, y_fit_np = X_seq[fit_mask], y_seq[fit_mask]
+    X_early_np, y_early_np = X_seq[early_mask], y_seq[early_mask]
     if len(X_fit_np) == 0 or len(X_early_np) == 0:
         return None
 
-    X_fit = torch.tensor(X_fit_np, dtype=torch.float32).to(device)
-    y_fit = torch.tensor(y_fit_np, dtype=torch.float32).to(device)
-    X_early = torch.tensor(X_early_np, dtype=torch.float32).to(device)
-    y_early = torch.tensor(y_early_np, dtype=torch.float32).to(device)
+    X_fit = torch.as_tensor(X_fit_np, dtype=torch.float32, device=DEVICE)
+    y_fit = torch.as_tensor(y_fit_np, dtype=torch.float32, device=DEVICE)
+    X_early = torch.as_tensor(X_early_np, dtype=torch.float32, device=DEVICE)
+    y_early = torch.as_tensor(y_early_np, dtype=torch.float32, device=DEVICE)
+    loader = DataLoader(TensorDataset(X_fit, y_fit), batch_size=32, shuffle=True)
 
-    train_loader = DataLoader(
-        TensorDataset(X_fit, y_fit), batch_size=32, shuffle=True
-    )
-
-    model = LSTMForecaster(
-        input_dim=X_fit.shape[2], hidden_dim=64, num_layers=2, output_dim=1
-    ).to(device)
+    model = LSTMForecaster(input_dim=len(features)).to(DEVICE)
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    best_loss, best_state, waiting, epochs_run = float("inf"), None, 0, 0
 
-    best_val_loss = float("inf")
-    best_state = None
-    epochs_without_improvement = 0
-    epochs_run = 0
-
-    for epoch in range(max_epochs):
+    fit_start = time.perf_counter()
+    for _ in range(max_epochs):
         model.train()
-        for batch_X, batch_y in train_loader:
+        for batch_x, batch_y in loader:
             optimizer.zero_grad()
-            loss = criterion(model(batch_X), batch_y)
+            loss = criterion(model(batch_x), batch_y)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-
         model.eval()
         with torch.no_grad():
-            val_loss = criterion(model(X_early), y_early).item()
-
+            validation_loss = float(criterion(model(X_early), y_early).item())
         epochs_run += 1
-        if val_loss < best_val_loss - 1e-6:
-            best_val_loss = val_loss
-            best_state = {
-                key: value.detach().cpu().clone()
-                for key, value in model.state_dict().items()
-            }
-            epochs_without_improvement = 0
+        if validation_loss < best_loss - 1e-6:
+            best_loss = validation_loss
+            best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+            waiting = 0
         else:
-            epochs_without_improvement += 1
-
-        if epochs_without_improvement >= patience:
+            waiting += 1
+        if waiting >= patience:
             break
-
+    fit_seconds = time.perf_counter() - fit_start
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    # Recursive multi-step test forecast. We start with the actual training
-    # history, then append each prediction as we move through the test window.
+    # Aligned blind recursive prediction:
+    # 1) use the previous 30 rows to predict the current row;
+    # 2) only then append this row's known covariates and predicted sale for later steps.
     model.eval()
     history_sales = train_df["Sales"].astype(float).tolist()
-    history_features = [
-        row for row in scaler_x.transform(train_df[features])
-    ]
+    history_features = [row for row in scaler_x.transform(train_df[features])]
     predictions = []
-
+    forecast_start = time.perf_counter()
     for _, base_row in test_df.iterrows():
-        feature_row = _update_sales_features(base_row[features], history_sales)
+        feature_row = update_sales_features(base_row[features], history_sales)
         scaled_row = scaler_x.transform(pd.DataFrame([feature_row], columns=features))[0]
-        history_features.append(scaled_row)
-
-        seq_input = np.asarray(history_features[-seq_length:], dtype=np.float32)
-        X_test = torch.tensor(seq_input[None, :, :], dtype=torch.float32).to(device)
+        sequence = np.asarray(history_features[-seq_length:], dtype=np.float32)
+        if len(sequence) < seq_length:
+            # This should be prevented by the training-length guard above.
+            raise RuntimeError("Insufficient history for an LSTM inference sequence.")
+        X_test = torch.as_tensor(sequence[None, :, :], dtype=torch.float32, device=DEVICE)
         with torch.no_grad():
-            pred_scaled = model(X_test).cpu().numpy()
+            prediction_scaled = model(X_test).detach().cpu().numpy()
+        prediction = float(scaler_y.inverse_transform(prediction_scaled)[0, 0])
+        prediction = max(0.0, prediction) if np.isfinite(prediction) else 0.0
+        predictions.append(prediction)
+        history_sales.append(prediction)
+        history_features.append(scaled_row)
+    forecast_seconds = time.perf_counter() - forecast_start
 
-        pred = float(scaler_y.inverse_transform(pred_scaled)[0, 0])
-        pred = max(0.0, pred)
-        predictions.append(pred)
-        history_sales.append(pred)
-
-    actual = test_df["Sales"].astype(float).tolist()
-    dates = test_df["Date"].dt.strftime("%Y-%m-%d").tolist()
-
+    artifact_path = None
+    if artifact_dir is not None:
+        artifact_path = _checkpoint_model(
+            model, scaler_x, scaler_y, features, int(df_store["Store"].iloc[0]), artifact_dir, split_date
+        )
     return {
-        "dates": dates,
-        "actual": actual,
+        "dates": test_df["Date"].dt.strftime("%Y-%m-%d").tolist(),
+        "actual": test_df["Sales"].astype(float).tolist(),
         "lstm": predictions,
         "epochs_run": epochs_run,
+        "fit_seconds": fit_seconds,
+        "forecast_seconds": forecast_seconds,
+        "artifact": str(artifact_path.relative_to(PROJECT_ROOT)) if artifact_path else None,
+        "total_seconds": time.perf_counter() - started_total,
     }
 
 
-if __name__ == "__main__":
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+def _write_results(results: dict, path: Path):
+    temp_path = path.with_suffix(".json.tmp")
+    temp_path.write_text(json.dumps(results, allow_nan=False), encoding="utf-8")
+    temp_path.replace(path)
 
-    print("Loading feature dataset for DL...")
-    df = pd.read_csv("../data/features/train_features.csv", parse_dates=["Date"])
-    df = df[df["Open"] == 1].sort_values(["Store", "Date"])
 
-    drop_cols = ["Date", "Sales", "Customers"]
-    features = [c for c in df.columns if c not in drop_cols]
+def main():
+    feature_path = PROJECT_ROOT / "data" / "features" / "train_features.csv"
+    frame = pd.read_csv(feature_path, parse_dates=["Date"], low_memory=False).sort_values(["Store", "Date"])
+    global_max_date = frame["Date"].max()  # Calculate once globally, before splitting per store.
+    split_date = global_max_date - pd.Timedelta(days=VAL_DAYS)
+    if "Open" in frame.columns:
+        frame = frame[frame["Open"].eq(1)].copy()
+    features = get_model_features(frame)
+    store_ids = sorted(frame["Store"].astype(int).unique())
 
-    all_stores = df["Store"].unique()
-    print(
-        f"Training LSTM for ALL {len(all_stores)} stores | "
-        f"max_epochs=50 | early_stopping patience=5"
-    )
+    feature_dir = PROJECT_ROOT / "data" / "features"
+    output_path = feature_dir / "dl_results.json"
+    metadata_path = feature_dir / "dl_run_metadata.json"
+    artifact_dir = PROJECT_ROOT / "models" / "lstm"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "model_version": MODEL_VERSION,
+        "global_max_date": global_max_date.strftime("%Y-%m-%d"),
+        "split_date": split_date.strftime("%Y-%m-%d"),
+        "features": features, "sequence_length": SEQ_LENGTH,
+        "max_epochs": MAX_EPOCHS, "patience": PATIENCE,
+    }
 
-    out_path = "../data/features/dl_results.json"
-    if os.path.exists(out_path):
-        with open(out_path, "r") as f:
-            store_results = json.load(f)
-        print(f"Resuming from {len(store_results)} already-completed stores.")
-    else:
-        store_results = {}
+    results = {}
+    if output_path.exists() and metadata_path.exists():
+        try:
+            old_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if old_metadata == metadata:
+                results = json.loads(output_path.read_text(encoding="utf-8"))
+                print(f"Resuming only from compatible results: {len(results)} stores")
+            else:
+                print("Existing LSTM output uses a different configuration; rebuilding results.")
+        except (json.JSONDecodeError, OSError):
+            print("Existing LSTM results are invalid; rebuilding results.")
+    elif output_path.exists():
+        print("Legacy LSTM results lack a run manifest; rebuilding to avoid stale forecasts.")
 
-    for i, target_store in enumerate(all_stores):
-        store_key = str(int(target_store))
-        if store_key in store_results:
+    runtime_rows = []
+    print(f"Training LSTM for {len(store_ids)} stores; global cutoff={split_date.date()} on {DEVICE}.")
+    for index, store_id in enumerate(store_ids, start=1):
+        key = str(int(store_id))
+        checkpoint = artifact_dir / f"store_{int(store_id):04d}.pt"
+        if key in results and checkpoint.exists():
             continue
-
-        df_store = df[df["Store"] == target_store].copy()
+        store_frame = frame[frame["Store"].astype(int).eq(int(store_id))].copy()
         result = train_store(
-            df_store,
-            features,
-            SEQ_LENGTH,
-            VAL_DAYS,
-            max_epochs=50,
-            patience=5,
+            store_frame, features, split_date,
+            seq_length=SEQ_LENGTH, max_epochs=MAX_EPOCHS, patience=PATIENCE,
+            artifact_dir=artifact_dir,
         )
-
         if result is None:
-            print(f"[{i+1}/{len(all_stores)}] Store {target_store}: Skipped")
+            print(f"[{index}/{len(store_ids)}] Store {store_id}: skipped (insufficient training/validation data)")
             continue
+        results[key] = result
+        runtime_rows.append({
+            "Model": "LSTM", "Store": int(store_id), "Scope": "Per-store model",
+            "FitSeconds": result["fit_seconds"], "ForecastSeconds": result["forecast_seconds"],
+            "TuningSeconds": 0.0, "TotalSeconds": result["total_seconds"], "Artifact": result["artifact"],
+        })
+        print(f"[{index}/{len(store_ids)}] Store {store_id}: {result['epochs_run']} epochs, {result['total_seconds']:.1f}s")
+        if index % 25 == 0:
+            _write_results(results, output_path)
+            metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+            pd.DataFrame(runtime_rows).to_csv(PROJECT_ROOT / "data" / "processed" / "dl_runtime_partial.csv", index=False)
 
-        store_results[store_key] = result
-        print(
-            f"[{i+1}/{len(all_stores)}] Store {target_store}: "
-            f"Done ({result['epochs_run']} epochs)"
-        )
+    _write_results(results, output_path)
+    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    # Rebuild runtime coverage from the completed result file so a resumed run
+    # still reports durations for stores completed in an earlier process.
+    complete_runtime_rows = []
+    for store_key, result in results.items():
+        if not isinstance(result, dict) or "lstm" not in result:
+            continue
+        complete_runtime_rows.append({
+            "Model": "LSTM", "Store": int(store_key), "Scope": "Per-store model",
+            "FitSeconds": float(result.get("fit_seconds", 0.0)),
+            "ForecastSeconds": float(result.get("forecast_seconds", 0.0)),
+            "TuningSeconds": 0.0, "TotalSeconds": float(result.get("total_seconds", 0.0)),
+            "Artifact": result.get("artifact", f"models/lstm/store_{int(store_key):04d}.pt"),
+        })
+    pd.DataFrame(complete_runtime_rows).to_csv(PROJECT_ROOT / "data" / "processed" / "dl_runtime.csv", index=False)
+    print(f"LSTM modeling complete: {len(results)} stores. Checkpoints: {artifact_dir}")
 
-        if (i + 1) % 50 == 0:
-            with open(out_path, "w") as f:
-                json.dump(store_results, f)
-            print(f"  >>> Checkpoint saved ({len(store_results)} stores completed)")
 
-    with open(out_path, "w") as f:
-        json.dump(store_results, f)
-
-    print(f"\nDL modeling complete. {len(store_results)} stores saved to {out_path}")
+if __name__ == "__main__":
+    main()

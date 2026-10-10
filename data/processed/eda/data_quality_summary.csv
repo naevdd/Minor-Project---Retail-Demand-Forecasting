@@ -9,4 +9,5 @@ Open-day zero-sales rows,54
 Sales IQR outlier rows (open days),30769
 Sales IQR lower bound,0.0
 Sales IQR upper bound,13611.5
-Missing cells,0
+Missing cells before imputation,2173431
+Missing cells after imputation,0

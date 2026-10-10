@@ -1,0 +1,50 @@
+{
+  "model_version": 2,
+  "final_holdout_cutoff": "2015-06-19",
+  "folds": [
+    {
+      "fold": 1,
+      "cutoff": "2015-04-10",
+      "validation_end": "2015-04-24"
+    },
+    {
+      "fold": 2,
+      "cutoff": "2015-04-24",
+      "validation_end": "2015-05-08"
+    },
+    {
+      "fold": 3,
+      "cutoff": "2015-05-08",
+      "validation_end": "2015-05-22"
+    }
+  ],
+  "stores": [
+    85,
+    138,
+    195,
+    196,
+    259,
+    330,
+    347,
+    353,
+    464,
+    515,
+    682,
+    772,
+    791,
+    806,
+    852,
+    982,
+    1006,
+    1053,
+    1070,
+    1081
+  ],
+  "models": [
+    "ARIMA",
+    "LIGHTGBM",
+    "LSTM",
+    "PROPHET",
+    "XGBOOST"
+  ]
+}

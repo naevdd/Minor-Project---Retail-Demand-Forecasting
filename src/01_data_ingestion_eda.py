@@ -13,14 +13,12 @@ EDA_DIR = PROCESSED_DIR / "eda"
 
 
 def load_data():
-    print("Loading datasets...")
+    """Load only the two source files required for historical forecasting."""
+    print("Loading Rossmann training and store datasets...")
     train = pd.read_csv(RAW_DIR / "train.csv", low_memory=False)
     store = pd.read_csv(RAW_DIR / "store.csv")
-    test = pd.read_csv(RAW_DIR / "test.csv")
-
     train["Date"] = pd.to_datetime(train["Date"])
-    test["Date"] = pd.to_datetime(test["Date"])
-    return train, store, test
+    return train, store
 
 
 def clean_and_merge(train: pd.DataFrame, store: pd.DataFrame) -> pd.DataFrame:
@@ -52,7 +50,7 @@ def _save(fig, filename: str) -> None:
     print(f"  Saved {path.relative_to(PROJECT_ROOT)}")
 
 
-def run_eda(df: pd.DataFrame) -> None:
+def run_eda(df: pd.DataFrame, raw_missing_counts: pd.Series | None = None) -> None:
     print("Running EDA...")
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     EDA_DIR.mkdir(parents=True, exist_ok=True)
@@ -70,7 +68,8 @@ def run_eda(df: pd.DataFrame) -> None:
 
     # 1. Data-quality summary, including an outlier diagnostic rather than
     # deleting potentially genuine retail demand spikes.
-    numeric_missing = df.isna().sum()
+    missing_before = raw_missing_counts if raw_missing_counts is not None else df.isna().sum()
+    missing_after = df.isna().sum()
     duplicate_rows = int(df.duplicated().sum())
     open_sales = open_df["Sales"].astype(float)
     q1, q3 = open_sales.quantile([0.25, 0.75])
@@ -91,12 +90,13 @@ def run_eda(df: pd.DataFrame) -> None:
             {"Metric": "Sales IQR outlier rows (open days)", "Value": outlier_count},
             {"Metric": "Sales IQR lower bound", "Value": lower},
             {"Metric": "Sales IQR upper bound", "Value": upper},
-            {"Metric": "Missing cells", "Value": int(numeric_missing.sum())},
+            {"Metric": "Missing cells before imputation", "Value": int(missing_before.sum())},
+            {"Metric": "Missing cells after imputation", "Value": int(missing_after.sum())},
         ]
     )
     summary.to_csv(EDA_DIR / "data_quality_summary.csv", index=False)
 
-    missing = numeric_missing[numeric_missing > 0].sort_values(ascending=False)
+    missing = missing_before[missing_before > 0].sort_values(ascending=False)
     missing.to_csv(EDA_DIR / "missing_values_by_column.csv", header=["MissingCount"])
 
     # Outliers are reported rather than automatically removed because extreme
@@ -183,6 +183,8 @@ def run_eda(df: pd.DataFrame) -> None:
 
 
 if __name__ == "__main__":
-    train, store, test = load_data()
+    train, store = load_data()
+    raw_merged = train.merge(store, on="Store", how="left")
+    raw_missing_counts = raw_merged.isna().sum()
     df_clean = clean_and_merge(train, store)
-    run_eda(df_clean)
+    run_eda(df_clean, raw_missing_counts=raw_missing_counts)

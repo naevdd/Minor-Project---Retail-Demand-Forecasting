@@ -1,0 +1,66 @@
+{
+  "model_version": 2,
+  "global_max_date": "2015-07-31",
+  "split_date": "2015-06-19",
+  "inner_tuning_cutoff": "2015-05-29",
+  "feature_count": 35,
+  "features": [
+    "Store",
+    "DayOfWeek",
+    "Promo",
+    "SchoolHoliday",
+    "CompetitionDistance",
+    "CompetitionOpenSinceMonth",
+    "CompetitionOpenSinceYear",
+    "Promo2",
+    "Promo2SinceWeek",
+    "Promo2SinceYear",
+    "Year",
+    "Month",
+    "Day",
+    "Sales_Lag_1",
+    "Sales_Lag_7",
+    "Sales_Lag_14",
+    "Sales_Lag_30",
+    "Sales_RollMean_7",
+    "Sales_RollStd_7",
+    "Sales_RollMin_7",
+    "Sales_RollMax_7",
+    "Sales_RollMean_14",
+    "Sales_RollStd_14",
+    "Sales_RollMin_14",
+    "Sales_RollMax_14",
+    "StoreType_b",
+    "StoreType_c",
+    "StoreType_d",
+    "Assortment_b",
+    "Assortment_c",
+    "StateHoliday_a",
+    "StateHoliday_b",
+    "StateHoliday_c",
+    "PromoInterval_Jan_Apr_Jul_Oct",
+    "PromoInterval_Mar_Jun_Sept_Dec"
+  ],
+  "configurations": {
+    "XGBOOST": {
+      "n_estimators": 100,
+      "max_depth": 8,
+      "learning_rate": 0.05,
+      "subsample": 0.8,
+      "colsample_bytree": 0.8
+    },
+    "LIGHTGBM": {
+      "n_estimators": 100,
+      "max_depth": 6,
+      "num_leaves": 31,
+      "learning_rate": 0.1,
+      "subsample": 0.9,
+      "colsample_bytree": 0.9
+    }
+  },
+  "completed_stores": 1115,
+  "models": [
+    "XGBOOST",
+    "LIGHTGBM"
+  ]
+}

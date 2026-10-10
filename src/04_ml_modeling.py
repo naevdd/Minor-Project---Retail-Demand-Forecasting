@@ -1,195 +1,191 @@
-import pandas as pd
-import numpy as np
-import os
-import xgboost as xgb
-import lightgbm as lgb
+"""Tune pooled XGBoost/LightGBM models and evaluate recursive open-day forecasts."""
+from pathlib import Path
 import json
 import re
+import time
 
+import lightgbm as lgb
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+
+from modeling_common import get_model_features, get_sample_stores, recursive_forecast, rmse
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VAL_DAYS = 42
-LAG_COLUMNS = {
-    "Sales_Lag_1": 1,
-    "Sales_Lag_7": 7,
-    "Sales_Lag_14": 14,
-    "Sales_Lag_30": 30,
-}
-ROLLING_COLUMNS = {
-    "Sales_RollMean_7": (7, "mean"),
-    "Sales_RollStd_7": (7, "std"),
-    "Sales_RollMean_14": (14, "mean"),
-    "Sales_RollStd_14": (14, "std"),
-}
+XGB_GRID = [
+    {"n_estimators": 100, "max_depth": 4, "learning_rate": 0.10, "subsample": 0.9, "colsample_bytree": 0.9},
+    {"n_estimators": 150, "max_depth": 6, "learning_rate": 0.05, "subsample": 0.9, "colsample_bytree": 0.9},
+    {"n_estimators": 100, "max_depth": 8, "learning_rate": 0.05, "subsample": 0.8, "colsample_bytree": 0.8},
+]
+LGB_GRID = [
+    {"n_estimators": 100, "max_depth": 6, "num_leaves": 31, "learning_rate": 0.10, "subsample": 0.9, "colsample_bytree": 0.9},
+    {"n_estimators": 150, "max_depth": 8, "num_leaves": 31, "learning_rate": 0.05, "subsample": 0.9, "colsample_bytree": 0.9},
+    {"n_estimators": 100, "max_depth": -1, "num_leaves": 63, "learning_rate": 0.05, "subsample": 0.8, "colsample_bytree": 0.8},
+]
 
 
-def _recursive_feature_row(row, history):
-    """Replace sales-derived validation features with information available at prediction time."""
-    row = row.copy()
-    history = pd.Series(history, dtype=float)
-
-    for col, lag in LAG_COLUMNS.items():
-        row[col] = float(history.iloc[-lag]) if len(history) >= lag else 0.0
-
-    for col, (window, stat) in ROLLING_COLUMNS.items():
-        if len(history) == 0:
-            value = 0.0
-        else:
-            values = history.iloc[-window:]
-            value = values.mean() if stat == "mean" else values.std()
-            if pd.isna(value):
-                value = 0.0
-        row[col] = float(value)
-
-    return row
+def make_xgb(config: dict):
+    return xgb.XGBRegressor(
+        objective="reg:squarederror", tree_method="hist", n_jobs=-1,
+        random_state=42, **config,
+    )
 
 
-def recursive_forecast(model, store_frame, split_date, features):
-    """Forecast each validation date recursively without using future actual sales."""
-    train_store = store_frame[store_frame["Date"] <= split_date].sort_values("Date")
-    val_store = store_frame[store_frame["Date"] > split_date].sort_values("Date")
-
-    history = train_store["Sales"].astype(float).tolist()
-    predictions = []
-
-    for _, row in val_store.iterrows():
-        feature_row = _recursive_feature_row(row[features], history)
-        X = pd.DataFrame([feature_row], columns=features)
-        pred = float(model.predict(X)[0])
-        # Sales cannot be negative.
-        pred = max(0.0, pred)
-        predictions.append(pred)
-        history.append(pred)
-
-    return val_store, predictions
+def make_lgb(config: dict):
+    return lgb.LGBMRegressor(
+        objective="regression", n_jobs=-1, random_state=42, verbosity=-1,
+        **config,
+    )
 
 
-def save_feature_importance(model, feature_names, path, model_name, importance_type="gain"):
-    """Save normalized feature importance for reporting and dashboard visualization."""
+def save_feature_importance(model, feature_names, path: Path, model_name: str):
     if model_name == "XGBOOST":
-        # The sklearn feature_importances_ for XGBoost uses the model's
-        # configured importance measure (gain by default for this estimator).
         importance = np.asarray(model.feature_importances_, dtype=float)
-    elif model_name == "LIGHTGBM":
-        importance = np.asarray(
-            model.booster_.feature_importance(importance_type=importance_type),
-            dtype=float,
+    else:
+        importance = np.asarray(model.booster_.feature_importance(importance_type="gain"), dtype=float)
+    frame = pd.DataFrame({"Feature": list(feature_names), "Importance": importance})
+    total = frame["Importance"].sum()
+    frame["ImportancePct"] = frame["Importance"] / total * 100.0 if total > 0 else 0.0
+    frame["Model"] = model_name
+    frame.sort_values("Importance", ascending=False).to_csv(path, index=False)
+
+
+def tune_model(model_name, grid, train_df, all_open_df, features, inner_cutoff, final_cutoff, sample_stores):
+    factory = make_xgb if model_name == "XGBOOST" else make_lgb
+    tuning_rows = []
+    fit_candidates = train_df[train_df["Date"] <= inner_cutoff]
+    if fit_candidates.empty:
+        fit_candidates = train_df
+    X_fit = fit_candidates[features]
+    y_fit = fit_candidates["Sales"].astype(float)
+    best_config = grid[0]
+    best_score = float("inf")
+
+    for index, config in enumerate(grid, start=1):
+        started = time.perf_counter()
+        model = factory(config)
+        model.fit(X_fit, y_fit)
+        actuals, predictions = [], []
+        for store_id in sample_stores:
+            store_frame = all_open_df[all_open_df["Store"].astype(int).eq(int(store_id))]
+            val, preds = recursive_forecast(
+                model, store_frame, inner_cutoff, features, end_date=final_cutoff
+            )
+            if len(val) and len(val) == len(preds):
+                actuals.extend(val["Sales"].astype(float).tolist())
+                predictions.extend(preds)
+        score = rmse(actuals, predictions)
+        tuning_rows.append({
+            "Store": "ALL", "Model": model_name, "Candidate": index,
+            "Parameters": json.dumps(config, sort_keys=True), "TuningRMSE": score,
+            "TuningSeconds": time.perf_counter() - started, "Error": "",
+        })
+        if score < best_score:
+            best_score, best_config = score, config
+        print(f"  {model_name} tuning candidate {index}/{len(grid)}: RMSE={score:.2f}")
+    return best_config, tuning_rows
+
+
+def train_ml_models(frame: pd.DataFrame, val_days: int = VAL_DAYS):
+    frame = frame.rename(columns=lambda name: re.sub(r"[^A-Za-z0-9_]+", "_", name))
+    frame = frame.sort_values(["Store", "Date"]).copy()
+    if "Open" in frame.columns:
+        frame = frame[frame["Open"].eq(1)].copy()
+
+    global_max_date = frame["Date"].max()
+    split_date = global_max_date - pd.Timedelta(days=val_days)
+    inner_cutoff = split_date - pd.Timedelta(days=21)
+    final_train = frame[frame["Date"] <= split_date].copy()
+    features = get_model_features(final_train)
+
+    store_meta_path = PROJECT_ROOT / "data" / "raw" / "store.csv"
+    store_meta = pd.read_csv(store_meta_path) if store_meta_path.exists() else None
+    sample_stores = get_sample_stores(PROJECT_ROOT, store_meta)
+    if not sample_stores:
+        sample_stores = sorted(frame["Store"].astype(int).unique())[:20]
+
+    print(f"Pooled ML training rows: {len(final_train):,}; common final cutoff={split_date.date()}")
+    processed_dir = PROJECT_ROOT / "data" / "processed"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    model_dir = PROJECT_ROOT / "models" / "ml"
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    tuning_rows, runtime_rows, models, configurations = [], [], {}, {}
+    for model_name, grid in (("XGBOOST", XGB_GRID), ("LIGHTGBM", LGB_GRID)):
+        tuning_start = time.perf_counter()
+        best_config, rows = tune_model(
+            model_name, grid, final_train, frame, features, inner_cutoff, split_date, sample_stores
         )
-    else:
-        raise ValueError(f"Unsupported model: {model_name}")
+        tuning_seconds = time.perf_counter() - tuning_start
+        tuning_rows.extend(rows)
+        model = (make_xgb if model_name == "XGBOOST" else make_lgb)(best_config)
+        fit_start = time.perf_counter()
+        model.fit(final_train[features], final_train["Sales"].astype(float))
+        fit_seconds = time.perf_counter() - fit_start
+        models[model_name] = model
+        configurations[model_name] = best_config
+        if model_name == "XGBOOST":
+            model.save_model(str(model_dir / "xgboost_model.json"))
+            save_feature_importance(model, features, processed_dir / "xgboost_feature_importance.csv", model_name)
+        else:
+            model.booster_.save_model(str(model_dir / "lightgbm_model.txt"))
+            save_feature_importance(model, features, processed_dir / "lightgbm_feature_importance.csv", model_name)
+        runtime_rows.append({
+            "Model": model_name, "Scope": "Pooled across all stores", "FitSeconds": fit_seconds,
+            "ForecastSeconds": 0.0, "TuningSeconds": tuning_seconds,
+            "Artifact": str((model_dir / ("xgboost_model.json" if model_name == "XGBOOST" else "lightgbm_model.txt")).relative_to(PROJECT_ROOT)),
+        })
+        print(f"{model_name} final fit complete in {fit_seconds:.1f}s; selected {best_config}")
 
-    imp_df = pd.DataFrame({
-        "Feature": list(feature_names),
-        "Importance": importance,
-    }).sort_values("Importance", ascending=False)
+    # Persist feature order and configuration so saved native artifacts can be reused.
+    (model_dir / "feature_columns.json").write_text(json.dumps(features, indent=2), encoding="utf-8")
+    (model_dir / "model_config.json").write_text(json.dumps({
+        "version": 2, "split_date": split_date.strftime("%Y-%m-%d"),
+        "inner_tuning_cutoff": inner_cutoff.strftime("%Y-%m-%d"),
+        "features": features, "configurations": configurations,
+    }, indent=2), encoding="utf-8")
 
-    total = imp_df["Importance"].sum()
-    if total > 0:
-        imp_df["ImportancePct"] = imp_df["Importance"] / total * 100.0
-    else:
-        imp_df["ImportancePct"] = 0.0
-
-    imp_df["Model"] = model_name
-    imp_df.to_csv(path, index=False)
-    return imp_df
-
-
-def train_ml_models(df, val_days=VAL_DAYS):
-    print("Preparing data for ML models...")
-    df = df.rename(columns=lambda x: re.sub("[^A-Za-z0-9_]+", "_", x))
-    df = df.sort_values(["Store", "Date"]).copy()
-
-    # Forecast demand only on open days, matching the classical and DL stages.
-    df = df[df["Open"] == 1].copy()
-
-    max_date = df["Date"].max()
-    split_date = max_date - pd.Timedelta(days=val_days)
-
-    train = df[df["Date"] <= split_date].copy()
-    val = df[df["Date"] > split_date].copy()
-
-    drop_cols = ["Date", "Sales", "Customers"]
-    features = [c for c in train.columns if c not in drop_cols]
-
-    X_train, y_train = train[features], train["Sales"]
-    print(f"Training on {len(X_train)} samples, common validation cutoff: {split_date.date()}.")
-
-    # --- XGBoost ---
-    print("Training XGBoost...")
-    xgb_model = xgb.XGBRegressor(
-        n_estimators=100,
-        max_depth=6,
-        learning_rate=0.1,
-        n_jobs=-1,
-        random_state=42,
-    )
-    xgb_model.fit(X_train, y_train)
-
-    # --- LightGBM ---
-    print("Training LightGBM...")
-    lgb_model = lgb.LGBMRegressor(
-        n_estimators=100,
-        max_depth=6,
-        learning_rate=0.1,
-        n_jobs=-1,
-        random_state=42,
-        verbosity=-1,
-    )
-    lgb_model.fit(X_train, y_train)
-
-    processed_dir = os.path.join("..", "data", "processed")
-    os.makedirs(processed_dir, exist_ok=True)
-    save_feature_importance(
-        xgb_model,
-        features,
-        os.path.join(processed_dir, "xgboost_feature_importance.csv"),
-        "XGBOOST",
-    )
-    save_feature_importance(
-        lgb_model,
-        features,
-        os.path.join(processed_dir, "lightgbm_feature_importance.csv"),
-        "LIGHTGBM",
-    )
-    print("Feature importance saved for XGBoost and LightGBM.")
-
-    # Generate recursive forecasts separately for every store. The model is
-    # still pooled across all stores; only the validation rollout is store-aware.
     store_results = {}
-    for store_id, store_frame in df.groupby("Store", sort=True):
-        store_frame = store_frame.sort_values("Date")
-        val_store = store_frame[store_frame["Date"] > split_date]
-        if val_store.empty:
+    forecast_seconds = {"XGBOOST": 0.0, "LIGHTGBM": 0.0}
+    for store_id, store_frame in frame.groupby("Store", sort=True):
+        row_started = time.perf_counter()
+        val, xgb_preds = recursive_forecast(models["XGBOOST"], store_frame, split_date, features)
+        forecast_seconds["XGBOOST"] += time.perf_counter() - row_started
+        row_started = time.perf_counter()
+        lgb_val, lgb_preds = recursive_forecast(models["LIGHTGBM"], store_frame, split_date, features)
+        forecast_seconds["LIGHTGBM"] += time.perf_counter() - row_started
+        if val.empty:
             continue
-
-        xgb_val, xgb_preds = recursive_forecast(
-            xgb_model, store_frame, split_date, features
-        )
-        lgb_val, lgb_preds = recursive_forecast(
-            lgb_model, store_frame, split_date, features
-        )
-
-        # Both models use the exact same store/date validation rows.
-        actual = xgb_val["Sales"].astype(float).tolist()
-        dates = xgb_val["Date"].dt.strftime("%Y-%m-%d").tolist()
-
+        actual = val["Sales"].astype(float).tolist()
+        dates = val["Date"].dt.strftime("%Y-%m-%d").tolist()
         store_results[str(int(store_id))] = {
-            "dates": dates,
-            "actual": actual,
-            "xgboost": xgb_preds,
-            "lightgbm": lgb_preds,
+            "dates": dates, "actual": actual,
+            "xgboost": xgb_preds, "lightgbm": lgb_preds,
         }
 
+    for runtime in runtime_rows:
+        runtime["ForecastSeconds"] = forecast_seconds[runtime["Model"]]
+    feature_dir = PROJECT_ROOT / "data" / "features"
+    (feature_dir / "ml_results.json").write_text(json.dumps(store_results, allow_nan=False), encoding="utf-8")
+    pd.DataFrame(tuning_rows).to_csv(processed_dir / "ml_tuning_results.csv", index=False)
+    pd.DataFrame(runtime_rows).to_csv(processed_dir / "ml_runtime.csv", index=False)
+    metadata = {
+        "model_version": 2,
+        "global_max_date": global_max_date.strftime("%Y-%m-%d"),
+        "split_date": split_date.strftime("%Y-%m-%d"),
+        "inner_tuning_cutoff": inner_cutoff.strftime("%Y-%m-%d"),
+        "feature_count": len(features), "features": features,
+        "configurations": configurations,
+        "completed_stores": len(store_results),
+        "models": ["XGBOOST", "LIGHTGBM"],
+    }
+    (feature_dir / "ml_run_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    print(f"ML modeling complete: {len(store_results)} stores. Artifacts saved under models/ml.")
     return store_results
 
 
 if __name__ == "__main__":
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
-
-    print("Loading feature dataset...")
-    df = pd.read_csv("../data/features/train_features.csv", parse_dates=["Date"])
-
-    store_results = train_ml_models(df)
-
-    with open("../data/features/ml_results.json", "w") as f:
-        json.dump(store_results, f)
-
-    print(f"ML modeling complete. {len(store_results)} stores saved.")
+    source = PROJECT_ROOT / "data" / "features" / "train_features.csv"
+    data = pd.read_csv(source, parse_dates=["Date"], low_memory=False)
+    train_ml_models(data)
