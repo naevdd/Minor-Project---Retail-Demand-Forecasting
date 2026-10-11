@@ -275,6 +275,20 @@ def main():
             "Artifact": result.get("artifact", f"models/lstm/store_{int(store_key):04d}.pt"),
         })
     pd.DataFrame(complete_runtime_rows).to_csv(PROJECT_ROOT / "data" / "processed" / "dl_runtime.csv", index=False)
+
+    # A partial runtime CSV is useful for recovery during an interrupted run,
+    # but is redundant once every store has a completed forecast and the full
+    # runtime report above has been written.
+    partial_runtime_path = PROJECT_ROOT / "data" / "processed" / "dl_runtime_partial.csv"
+    all_stores_complete = all(
+        str(int(store_id)) in results
+        and isinstance(results[str(int(store_id))], dict)
+        and "lstm" in results[str(int(store_id))]
+        for store_id in store_ids
+    )
+    if all_stores_complete:
+        partial_runtime_path.unlink(missing_ok=True)
+
     print(f"LSTM modeling complete: {len(results)} stores. Checkpoints: {artifact_dir}")
 
 

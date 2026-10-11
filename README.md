@@ -149,182 +149,195 @@ LSTM is treated as the deep-learning extension of the project. Temporal Fusion T
 
 ## 5. Evaluation Protocol
 
-All five models are evaluated on a shared time-based validation cutoff.
+The project uses two complementary evaluation designs: a final fixed holdout for the primary benchmark and a three-fold expanding-window rolling-origin backtest for robustness. Both preserve chronological ordering; observations are not randomly shuffled across time.
 
-| Parameter | Current implementation |
+### Fixed-holdout benchmark
+
+| Parameter | Implementation |
 |---|---|
 | Training cutoff | 19 June 2015 |
-| Validation calendar period | 20 June – 31 July 2015 |
+| Validation period | 20 June – 31 July 2015 |
 | Forecast horizon | Up to 42 calendar days |
-| Evaluation observations | Open-store validation observations |
-| Classical-model coverage | 20 representative stores |
-| XGBoost coverage | 1,115 stores |
-| LightGBM coverage | 1,115 stores |
+| Evaluation rows | Open-store observations in the validation period |
+| ARIMA and Prophet coverage | 20 stratified stores |
+| XGBoost and LightGBM coverage | 1,115 stores each |
 | LSTM coverage | 1,115 stores |
 
-The number of evaluated observations can vary between stores because the evaluation excludes closed-store days.
+The number of validation observations varies by store because closed-store days are excluded from the demand-forecasting evaluation. The direct five-model comparison uses the 20 stores for which all five models have forecasts, ensuring that the models are compared on the same stores and dates.
+
+### Rolling-origin validation
+
+A separate three-fold expanding-window backtest evaluates all five models on the same 20 representative stores. Each fold uses a 14-calendar-day validation horizon and only information available before its forecast origin. The folds are:
+
+| Fold | Training cutoff | Validation end |
+|---|---|---|
+| 1 | 10 April 2015 | 24 April 2015 |
+| 2 | 24 April 2015 | 8 May 2015 |
+| 3 | 8 May 2015 | 22 May 2015 |
+
+The folds are before the final fixed-holdout period. The generated `rolling_origin_results.csv` contains 3,595 prediction rows in total, equal to 719 forecast observations per model across the three folds and 20 stores. The rolling-origin benchmark complements rather than replaces the fixed-holdout results.
+
+### Hyperparameter selection
+
+The implementation uses bounded candidate searches for ARIMA orders and Prophet configurations, and for the XGBoost and LightGBM model parameters. Rolling-origin tuning uses only each fold's historical training portion and an internal chronological validation segment; the fold's evaluation observations are not used to select that fold's parameters. The selected settings and candidate scores are recorded in the tuning-result CSV files.
 
 ### Evaluation metrics
 
-**Root Mean Squared Error (RMSE)**
+**Root Mean Squared Error (RMSE)** is the square root of mean squared prediction error and penalizes larger errors more strongly.
 
-RMSE measures the square root of the average squared prediction error. It penalizes large errors more heavily than MAE.
+**Mean Absolute Error (MAE)** is the mean absolute difference between actual and predicted sales.
 
-**Mean Absolute Error (MAE)**
+**Mean Absolute Percentage Error (MAPE)** expresses absolute error relative to actual sales as a percentage. Observations with zero actual sales are excluded from MAPE because percentage error is undefined at zero. RMSE and MAE are reported alongside MAPE so that the evaluation is not dependent on a percentage metric alone.
 
-MAE measures the average absolute difference between actual and predicted sales. Lower MAE indicates smaller absolute errors.
+Lower values are better for all three metrics.
 
-**Mean Absolute Percentage Error (MAPE)**
+### Statistical comparisons
 
-MAPE measures absolute errors relative to actual sales, expressed as a percentage. In this project, observations with zero actual sales are excluded from the MAPE calculation.
+The evaluation script performs paired Wilcoxon signed-rank tests on store-level MAE averaged over the rolling-origin folds. Ten pairwise model comparisons are made and the Holm correction is applied to control for multiple testing. These tests complement the descriptive metric rankings; statistical significance is not inferred from point-estimate rankings alone.
 
-Lower values indicate better performance for all three metrics.
+### Prediction intervals
 
-### Common-store benchmark
-
-ARIMA and Prophet are evaluated on 20 representative stores, while the pooled models cover all 1,115 stores.
-
-To make a direct five-model comparison, the aggregate benchmark restricts the comparison to the 20 stores for which all five models have evaluation results.
-
-This common-store benchmark is the primary basis for the accuracy–complexity discussion below. It should not be interpreted as a five-model comparison across all 1,115 stores.
-
-**Validation note:** The current reported benchmark uses a fixed time-based holdout. It should not be described as a completed rolling-origin cross-validation study unless multiple rolling forecast origins have also been evaluated.
+ARIMA and Prophet also save nominal 95% prediction intervals for the fixed-holdout forecasts. Their empirical coverage is reported with the results so that uncertainty estimates can be assessed, rather than assuming that nominal 95% intervals automatically achieve 95% coverage.
 
 ## 6. Results
 
-The following results are from the current evaluation run over the 20 common benchmark stores.
+### Fixed-holdout benchmark: common 20-store sample
+
+The following table reports the saved results from the fixed holdout, restricted to the 20 stores for which all five models are available.
 
 | Model | RMSE | MAE | MAPE |
 |---|---:|---:|---:|
-| ARIMA | 1,942.24 | 1,619.83 | 25.10% |
-| Prophet | 1,481.55 | 1,237.08 | 17.55% |
-| XGBoost | 1,477.06 | 1,202.84 | 18.84% |
-| LightGBM | **1,444.70** | **1,163.33** | 17.91% |
-| LSTM | 1,856.78 | 1,375.84 | 21.91% |
+| **XGBoost** | **1,130.03** | **910.50** | **13.45%** |
+| LightGBM | 1,180.56 | 951.30 | 13.91% |
+| LSTM | 1,190.19 | 943.51 | 14.18% |
+| Prophet | 1,493.70 | 1,243.34 | 17.68% |
+| ARIMA | 1,924.47 | 1,603.13 | 24.53% |
 
-Lower values indicate better predictive accuracy.
+XGBoost has the lowest RMSE, MAE, and MAPE in this benchmark. LightGBM and LSTM are close on the absolute-error metrics, while Prophet and ARIMA have higher errors. These results describe the selected stores and this training configuration; they do not establish that the same ranking will hold for every store or future time period.
 
-These results are descriptive and specific to the selected stores, training configuration, and validation period.
+### Rolling-origin validation
+
+The combined rolling-origin metrics across the three folds are:
+
+| Model | RMSE | MAE | MAPE |
+|---|---:|---:|---:|
+| **XGBoost** | **1,345.06** | **987.92** | **13.51%** |
+| LightGBM | 1,373.54 | 1,014.23 | 13.94% |
+| Prophet | 1,630.39 | 1,192.26 | 16.22% |
+| LSTM | 1,595.33 | 1,172.46 | 16.58% |
+| ARIMA | 2,242.82 | 1,658.54 | 21.53% |
+
+XGBoost also has the lowest errors in the rolling-origin results. This adds evidence that its fixed-holdout ranking is not unique to a single forecast window. However, three folds and 20 stores remain a limited sample of possible retail conditions.
+
+### Statistical significance
+
+At a 5% significance level after Holm correction, the paired tests find significant differences between ARIMA and each of the other four models. None of the comparisons among XGBoost, LightGBM, LSTM, and Prophet is significant after correction. Therefore, the results support XGBoost as the best *point-estimate performer* in these experiments, but they do not demonstrate that it is statistically superior to every other non-ARIMA model.
+
+The exact raw and Holm-adjusted p-values, along with the paired-store counts, are available in `data/processed/significance_tests.csv`.
+
+### Prediction-interval coverage
+
+Empirical coverage of the nominal 95% fixed-holdout intervals, calculated over the saved ARIMA and Prophet forecast points, is:
+
+| Model | Empirical coverage | Mean interval width |
+|---|---:|---:|
+| ARIMA | 97.7% | Approximately 11,354 sales units |
+| Prophet | 77.6% | Approximately 3,732 sales units |
+
+ARIMA's intervals are wide and cover slightly more observations than the nominal level; Prophet's intervals cover fewer observations than expected for a well-calibrated 95% interval. These results do not invalidate the point-forecast metrics, but they show that uncertainty estimates need separate assessment and may require calibration.
 
 ## 7. Accuracy–Complexity Trade-off
 
-The results show that a more complex model does not necessarily produce the best forecast under every accuracy metric.
+The accuracy results show that model complexity alone does not guarantee better forecasts. XGBoost has the lowest point-estimate errors in both reported evaluations, while LightGBM and LSTM remain close on the fixed-holdout absolute-error metrics. The statistical tests do not establish significant differences among those non-ARIMA models after correcting for multiple comparisons.
 
-### Prophet: competitive percentage accuracy
+### Recorded runtime
 
-Prophet achieves the lowest MAPE of 17.55%. Its MAPE is only 0.36 percentage points lower than LightGBM's 17.91%.
+The latest run's aggregate runtime report is:
 
-This demonstrates that a classical model can remain competitive with a more feature-intensive machine-learning approach in relative-error performance.
+| Model | Workload recorded | Fit time (s) | Forecast time (s) | Tuning time (s) | Total recorded time (s) |
+|---|---|---:|---:|---:|---:|
+| ARIMA | 20 store models | 2.79 | 0.03 | 6.42 | 9.24 |
+| Prophet | 20 store models | 4.31 | 0.74 | 14.88 | 19.93 |
+| LightGBM | 1 pooled model | 2.61 | 180.24 | 18.54 | 201.39 |
+| XGBoost | 1 pooled model | 6.65 | 300.24 | 23.19 | 330.08 |
+| LSTM | 1,115 per-store models | 1,778.09 | 130.05 | 0.00 | 1,908.14 |
 
-### LightGBM: lowest absolute errors
-
-LightGBM achieves the lowest RMSE and MAE across the common benchmark stores.
-
-Compared with ARIMA, LightGBM reduces RMSE by approximately 25.6% and MAE by approximately 28.2%. This suggests that pooled learning and engineered features can improve absolute-error performance over a univariate classical baseline.
-
-### XGBoost: competitive but not the strongest booster
-
-XGBoost performs reasonably closely to LightGBM, but its reported errors are slightly higher across all three metrics.
-
-In this experiment, the additional modeling flexibility of XGBoost does not produce an accuracy advantage over LightGBM.
-
-### LSTM: complexity without a demonstrated accuracy advantage
-
-LSTM has higher aggregate errors than Prophet and LightGBM in the current benchmark. Its greater training and computational requirements have therefore not translated into better reported accuracy under the current configuration.
-
-This does not establish that LSTM is inherently inferior. The result may depend on training history, architecture, hyperparameters, and recursive forecast behaviour.
+These are measurements from the recorded run environment, not hardware-independent benchmark figures. The workloads differ: ARIMA and Prophet are each fitted for 20 stores, the tree models are pooled across the dataset, and LSTM trains a separate model for each of 1,115 stores. Total times include the recorded fitting, forecasting, and tuning components. Memory consumption was not measured, so the accuracy–complexity comparison is based on forecast errors and elapsed time rather than a complete resource-utilization study.
 
 ### Overall interpretation
 
-The current evidence favours Prophet when relative percentage accuracy is the primary criterion and LightGBM when minimizing absolute forecast errors is more important.
+The experiments favour XGBoost on the reported point-forecast metrics, while the runtime report shows that its recursive forecast stage took longer than LightGBM's in this run. LSTM required the greatest total recorded time because 1,115 separate networks were fitted. Those observations describe this implementation and hardware; they should not be generalized as universal rankings of the algorithms.
 
-The results support the project's central research question: the benefits of additional model complexity should be established empirically rather than assumed.
-
-The reported metrics do not, by themselves, establish statistical significance or quantify accuracy gained per unit of runtime or memory. Those conclusions would require additional testing and direct measurement of computational costs.
+The intervals, significance tests, and rolling-origin results show why a model should be assessed through several complementary criteria rather than a single error metric or an assumption that a more complex model will perform better.
 
 ## 8. Project Structure
 
 ```text
 Retail_Demand_Forecasting/
-│
+├── .gitignore
 ├── README.md
+├── requirements.txt
 ├── run_pipeline.py
-│
 ├── dashboard/
 │   └── app.py
-│
 ├── src/
 │   ├── 01_data_ingestion_eda.py
 │   ├── 02_feature_engineering.py
 │   ├── 03_classical_modeling.py
 │   ├── 04_ml_modeling.py
 │   ├── 05_dl_modeling.py
-│   └── 06_evaluation.py
-│
+│   ├── 06_evaluation.py
+│   ├── 07_rolling_origin_validation.py
+│   └── modeling_common.py
 └── data/
-    ├── raw/
-    │   ├── train.csv
-    │   ├── store.csv
-    │   └── test.csv
-    │
-    ├── processed/
-    │   ├── train_clean.csv
-    │   ├── metrics.csv
-    │   ├── common_benchmark_stores.json
-    │   ├── xgboost_feature_importance.csv
-    │   ├── lightgbm_feature_importance.csv
-    │   └── eda/
-    │
-    └── features/
-        ├── train_features.csv
-        ├── classical_results.json
-        ├── ml_results.json
-        └── dl_results.json
+    ├── raw/                         # downloaded locally; not included
+    ├── features/
+    │   ├── classical_results.json
+    │   ├── classical_run_metadata.json
+    │   ├── dl_results.json
+    │   ├── dl_run_metadata.json
+    │   ├── ml_results.json
+    │   └── ml_run_metadata.json
+    └── processed/
+        ├── metrics.csv
+        ├── common_benchmark_metrics.csv
+        ├── rolling_origin_results.csv
+        ├── rolling_origin_metrics.csv
+        ├── significance_tests.csv
+        ├── runtime_summary.csv
+        ├── tuning-result CSV files
+        ├── feature-importance CSV files
+        └── eda/
 ```
 
-Some output files are generated only after their corresponding pipeline stages have run.
+`data/raw/`, the large intermediate training tables, and the `models/` checkpoint directory are not included in the source repository. The pipeline creates the intermediate tables and model checkpoints locally. `models/` is ignored by Git because the trained artifacts can be large; the saved forecast JSON and evaluation reports are included so the dashboard can display the completed run without retraining.
 
 ### Key directories
 
-**`src/`**
+- **`src/`** contains ingestion/EDA, feature engineering, classical modeling, pooled machine learning, LSTM training, rolling-origin validation, and final evaluation.
+- **`dashboard/`** contains the Streamlit application.
+- **`data/raw/`** is where the two required Rossmann input CSVs are placed locally.
+- **`data/features/`** contains saved forecast results and model-run manifests.
+- **`data/processed/`** contains EDA outputs, metrics, tuning results, feature importance, rolling-origin predictions and summaries, statistical tests, and runtime reports.
+- **`models/`** is generated locally when modeling runs and contains trained checkpoints; it is deliberately not tracked by Git.
 
-Contains the scripts for ingestion and EDA, feature engineering, classical modeling, machine learning, deep learning, and evaluation.
-
-**`dashboard/`**
-
-Contains the Streamlit application used to explore model forecasts and benchmark results.
-
-**`data/raw/`**
-
-Contains the original input CSV files downloaded from Kaggle.
-
-**`data/processed/`**
-
-Contains cleaned data, EDA outputs, evaluation metrics, common benchmark store information, and feature-importance tables.
-
-**`data/features/`**
-
-Contains the engineered feature dataset and saved forecast results for the classical, ML, and DL models.
-
-The saved JSON prediction files are used by the dashboard to display forecasts without retraining models on every page interaction.
+The saved forecast JSON files are used by the dashboard to display predictions without retraining models on every page interaction.
 
 ## 9. Installation and Setup
 
 ### Prerequisites
 
-- Python
+- Python version compatible with the packages in `requirements.txt`
 - Git
-- Access to the Rossmann Store Sales dataset
-- A GPU is optional; CPU execution is supported, although LSTM training can take longer.
+- The Rossmann Store Sales training and store metadata CSVs
+- A GPU is optional. CPU execution is supported, although LSTM training can take much longer.
 
 ### Clone the repository
 
-```bash
-git clone <YOUR_GITHUB_REPOSITORY_URL>
-cd <YOUR_REPOSITORY_FOLDER>
+```powershell
+git clone https://github.com/naevdd/Minor-Project---Retail-Demand-Forecasting.git
+cd Minor-Project---Retail-Demand-Forecasting
 ```
-
-Replace the placeholders with the HTTPS URL of your GitHub repository and its local folder name.
 
 ### Create a virtual environment
 
@@ -338,164 +351,140 @@ python -m pip install --upgrade pip
 
 ### Install dependencies
 
-Install the core libraries:
-
 ```powershell
-python -m pip install pandas numpy matplotlib seaborn scikit-learn statsmodels prophet xgboost lightgbm streamlit plotly
+python -m pip install -r requirements.txt
 ```
 
-Install PyTorch separately using the [official PyTorch installation selector](https://pytorch.org/get-started/locally/) to choose a build compatible with your operating system, Python version, and CUDA configuration.
-
-To use an NVIDIA GPU, verify that the CUDA-enabled PyTorch build is installed:
+For NVIDIA GPU acceleration, install or replace PyTorch with a build compatible with your system using the [official PyTorch installation selector](https://pytorch.org/get-started/locally/). Then verify the installation:
 
 ```powershell
 python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU only')"
 ```
 
-A `True` result from `torch.cuda.is_available()` indicates that PyTorch can access CUDA.
+A `True` result from `torch.cuda.is_available()` indicates that PyTorch can access CUDA. GPU acceleration is optional; if CUDA is unavailable, the LSTM stage runs on CPU.
 
 ### Add the dataset
 
-Download the required Rossmann CSV files from Kaggle and place them in:
+Download the Rossmann Store Sales training dataset from [Kaggle](https://www.kaggle.com/c/rossmann-store-sales) and place these files at the following paths:
 
 ```text
 data/raw/train.csv
 data/raw/store.csv
-data/raw/test.csv
 ```
 
-The scripts expect these filenames and locations.
+These are the two files required by the pipeline. The original competition `test.csv` is not used to calculate the validation metrics.
 
 ## 10. Running the Project
 
-Run commands from the project root unless noted otherwise.
-
-### Step 1: Data cleaning and EDA
-
-```powershell
-python .\src\01_data_ingestion_eda.py
-```
-
-This generates the cleaned training dataset and EDA outputs.
-
-### Step 2: Feature engineering
-
-```powershell
-python .\src\02_feature_engineering.py
-```
-
-This creates `data/features/train_features.csv`.
-
-### Step 3: Run modeling and evaluation
+Run commands from the project root. The recommended full run is:
 
 ```powershell
 python .\run_pipeline.py
 ```
 
-The pipeline runs the following stages in order:
+The runner executes the stages in this order:
 
-1. `03_classical_modeling.py`
-2. `04_ml_modeling.py`
-3. `05_dl_modeling.py`
-4. `06_evaluation.py`
+1. `src/01_data_ingestion_eda.py` — cleaning, data-quality report, and EDA plots.
+2. `src/02_feature_engineering.py` — lag, rolling, calendar, and categorical features.
+3. `src/03_classical_modeling.py` — ARIMA and Prophet for the 20-store benchmark.
+4. `src/04_ml_modeling.py` — pooled XGBoost and LightGBM models.
+5. `src/05_dl_modeling.py` — LSTM models for individual stores.
+6. `src/07_rolling_origin_validation.py` — three-fold expanding-window backtest.
+7. `src/06_evaluation.py` — fixed-holdout metrics, rolling-origin metrics, statistical comparisons, and runtime summaries.
 
-The full run may take some time, especially when fitting the classical models and training LSTM on CPU.
+The full pipeline can take substantial time, particularly when training 1,115 LSTM models and running the rolling-origin backtest. The run saves forecasts and reports under `data/features/` and `data/processed/`, with trained checkpoints under the locally generated `models/` directory.
 
-Existing result files may be reused by the deep-learning stage. If the saved results were generated by an older incompatible implementation, regenerate them before relying on the evaluation output.
+For the final reported results, allow all stages to finish successfully. If you use `--skip-rolling-validation` for a diagnostic run, do not treat previously existing rolling-origin reports as evidence that the skipped validation stage ran in that execution.
 
-### Step 4: Launch the dashboard
+### Launch the dashboard
+
+After the outputs have been generated, run:
 
 ```powershell
 streamlit run .\dashboard\app.py
 ```
 
-Streamlit will display a local URL in the terminal, typically `http://localhost:8501`.
-
-Open that address in a browser.
+Open the local URL printed by Streamlit, usually `http://localhost:8501`. The dashboard uses the saved forecast and evaluation files; it does not need to retrain the models when users browse the results.
 
 ## 11. Interactive Dashboard
 
-The dashboard provides three main sections.
+The dashboard provides four main tabs.
 
 ### Forecast Explorer
 
-Allows users to select stores, choose available models, specify a validation date range, and compare predicted sales against actual sales.
+Allows users to select stores, choose available models, specify a validation date range, and compare predicted sales against actual sales. When ARIMA or Prophet are selected, their saved lower and upper prediction-interval bounds are also shown where available.
 
-For a store included in the classical benchmark sample, the available comparison can include all five models:
-
-- ARIMA
-- Prophet
-- XGBoost
-- LightGBM
-- LSTM
-
-ARIMA and Prophet are only available for the 20 representative benchmark stores. They are not fitted for every store.
-
-The dashboard displays error metrics for the selected store/model results and aligns forecast points with their validation dates.
+For a store included in the classical benchmark sample, the available comparison can include all five models: ARIMA, Prophet, XGBoost, LightGBM, and LSTM. ARIMA and Prophet are only available for the 20 representative benchmark stores; they are not fitted for every store. The dashboard aligns selected-model forecasts to common dates for a fair per-store display.
 
 ### Aggregate Benchmarks
 
-Displays aggregate RMSE, MAE, and MAPE comparisons.
-
-The primary five-model benchmark uses the common sample of 20 stores. A separate model-coverage section shows the number of stores evaluated by each model.
+Displays aggregate RMSE, MAE, and MAPE comparisons. The primary five-model benchmark uses the common sample of 20 stores. A separate model-coverage section shows the number of stores evaluated by each model.
 
 ### Feature Importance
 
-Displays feature-importance rankings for XGBoost and LightGBM. These rankings help identify which engineered inputs are most influential within the fitted tree models.
+Displays feature-importance rankings for XGBoost and LightGBM. These rankings help identify which engineered inputs are most influential within the fitted tree models. Feature importance describes model reliance, not necessarily causal relationships; a highly ranked feature should not automatically be interpreted as the cause of increased or decreased sales.
 
-Feature importance describes model reliance, not necessarily causal relationships. A feature with high importance should not automatically be interpreted as the cause of increased or decreased sales.
+### Validation & Runtime
+
+Displays the three-fold rolling-origin metrics, paired Wilcoxon comparisons with Holm-adjusted p-values, and runtime summaries. These reports let users examine performance across forecast origins and compare measured elapsed time alongside the accuracy metrics. Runtime comparisons should be interpreted in light of the different workloads used by the classical, pooled tree, and per-store LSTM models.
 
 ## 12. Generated Outputs
 
 | Output | Purpose |
 |---|---|
-| `train_clean.csv` | Cleaned and merged historical training data. |
-| `train_features.csv` | Historical training data with engineered lag, rolling, calendar, and categorical features. |
-| `classical_results.json` | Classical forecasts and actual validation values for the benchmark stores. |
-| `ml_results.json` | XGBoost and LightGBM forecasts, dates, and actual values. |
-| `dl_results.json` | LSTM forecasts, dates, actual values, and training information. |
-| `metrics.csv` | Per-store model evaluation metrics. |
-| `common_benchmark_stores.json` | IDs of stores available for the direct five-model comparison. |
-| `xgboost_feature_importance.csv` | Ranked XGBoost feature-importance values. |
-| `lightgbm_feature_importance.csv` | Ranked LightGBM feature-importance values. |
-| `eda/` | EDA plots and data-quality summaries. |
+| `data/processed/train_clean.csv` | Cleaned, merged historical data; generated locally. |
+| `data/features/train_features.csv` | Engineered training table; generated locally and excluded from Git because of its size. |
+| `data/features/classical_results.json` | ARIMA and Prophet predictions, actuals, and lower/upper interval bounds for benchmark stores. |
+| `data/features/ml_results.json` | XGBoost and LightGBM forecasts, dates, and actual values. |
+| `data/features/dl_results.json` | LSTM forecasts, dates, actual values, training information, and artifact references. |
+| `data/features/*_run_metadata.json` | Configuration/split manifests used to identify model-output versions. |
+| `data/processed/metrics.csv` | Per-store fixed-holdout metrics. |
+| `data/processed/common_benchmark_metrics.csv` | Five-model results on the same 20-store sample. |
+| `data/processed/rolling_origin_results.csv` | Per-store predictions from the three expanding-window folds. |
+| `data/processed/rolling_origin_metrics.csv` | Per-fold and combined rolling-origin RMSE, MAE, and MAPE. |
+| `data/processed/significance_tests.csv` | Paired Wilcoxon tests and Holm-adjusted p-values. |
+| `data/processed/runtime_summary.csv` | Aggregate fitting, forecasting, tuning, and total recorded times. |
+| `data/processed/classical_tuning_results.csv`, `ml_tuning_results.csv` | Candidate configurations and tuning scores. |
+| `data/processed/classical_runtime.csv`, `ml_runtime.csv`, `dl_runtime.csv` | Model-level runtime measurements. |
+| `data/processed/accuracy_complexity_summary.csv` | Common-store accuracy joined to runtime measurements. |
+| `data/processed/xgboost_feature_importance.csv`, `lightgbm_feature_importance.csv` | Feature-importance tables for the pooled tree models. |
+| `data/processed/eda/` | EDA plots, data-quality statistics, and missing-value summaries. |
 
-The CSV metrics and JSON forecasts are generated artifacts. They can be regenerated by running the appropriate pipeline stages.
+The forecast JSONs and evaluation reports are included in the repository as generated results. The raw data, large intermediate feature table, and trained model checkpoints are not included. Re-running the pipeline with the dataset regenerates those local artifacts.
 
 ## 13. Limitations
 
-- The classical models are evaluated on 20 representative stores because fitting ARIMA and Prophet for all 1,115 stores can be computationally expensive.
-- The direct five-model aggregate comparison is therefore based on those 20 stores.
-- The dataset covers 2013–2015 and represents a particular retail chain and geographic context.
-- The current benchmark uses a fixed time-based holdout; broader rolling-origin validation would provide additional evidence about performance stability across forecast origins.
-- MAPE excludes zero actual-sales observations, so it should be interpreted alongside RMSE and MAE.
-- Recursive multi-step forecasting can amplify prediction errors. Individual-store forecast curves may therefore behave differently from the aggregate benchmark.
-- Current results do not independently establish statistical significance between models.
-- TFT remains a stretch goal and is not included in the reported five-model benchmark.
-- Model performance may change with different hyperparameters, forecasting horizons, feature representations, or store populations.
+- ARIMA and Prophet are evaluated on 20 stratified stores because fitting them for all 1,115 stores is computationally expensive. Therefore, the fair five-model benchmark covers this common 20-store subset, not all stores.
+- The data covers 2013–2015 and one retail chain. Performance on newer data or other retailers has not been established.
+- XGBoost has the lowest point-estimate errors in the saved fixed-holdout and rolling-origin reports, but the paired significance tests do not establish statistically significant differences among XGBoost, LightGBM, LSTM, and Prophet after Holm correction.
+- The nominal 95% prediction intervals are not perfectly calibrated: empirical coverage is approximately 97.7% for ARIMA and 77.6% for Prophet in the fixed-holdout predictions. ARIMA's intervals are also wide.
+- Runtime results reflect different workloads and the machine used for the recorded run. Memory consumption was not measured, so the runtime table is not a standardized compute benchmark.
+- MAPE excludes zero actual-sales observations, and should be interpreted alongside RMSE and MAE.
+- Recursive forecasts can amplify errors over a multi-day horizon. The benchmark metrics summarize the evaluation windows and do not guarantee equally stable predictions for every individual store.
+- Model-checkpoint files are generated locally and ignored by Git. The checked-in forecast files support dashboard use, but loading a trained checkpoint requires rerunning the training pipeline or separately preserving the local `models/` directory.
+- Temporal Fusion Transformer (TFT) remains an optional stretch goal and is not part of the five-model results.
 
 ## 14. Future Work
 
-Potential extensions include:
+Potential extensions that build on the current implementation include:
 
-- Rolling-origin cross-validation for more robust performance assessment.
-- Statistical significance testing on paired forecast errors.
-- Measuring model training time, inference time, and resource requirements.
-- Further investigation of recursive forecast instability in individual stores.
-- Hyperparameter optimization and systematic sensitivity analysis.
-- Exploring Temporal Fusion Transformer if resources and time permit.
+- Calibrating forecast intervals and evaluating coverage across stores and horizons.
+- Testing on newer periods or an additional retail dataset to assess external validity.
+- Measuring memory use and conducting a more standardized accuracy–runtime comparison.
+- Expanding the bounded tuning search and checking sensitivity to forecast horizon and store characteristics.
+- Investigating stores and time windows where recursive forecast errors grow sharply.
+- Connecting predictions to inventory/replenishment decisions and measuring their operational impact.
+- Exploring Temporal Fusion Transformer (TFT) if sufficient time and resources are available; it is a stretch goal, not a required component of the current project.
 
-These extensions should be distinguished from functionality already implemented and evaluated.
+These are extensions. The fixed-holdout benchmark, rolling-origin validation, paired significance tests, runtime reports, and Streamlit dashboard described above are implemented in the current pipeline.
 
 ## 15. Conclusion
 
-This project provides a comparative retail demand forecasting pipeline spanning classical statistical forecasting, pooled machine learning, and deep learning.
+This project developed and evaluated five approaches for retail sales forecasting using the Rossmann Store Sales dataset: ARIMA, Prophet, XGBoost, LightGBM, and LSTM. The workflow includes exploratory data analysis, feature engineering, bounded hyperparameter searches, a fixed chronological holdout, three-fold expanding-window validation, paired statistical comparisons, runtime measurement, and an interactive Streamlit dashboard.
 
-The current common-store benchmark shows that Prophet achieves the lowest MAPE, LightGBM achieves the lowest RMSE and MAE, and the LSTM implementation does not outperform those approaches on the reported metrics.
+On the common 20-store fixed-holdout benchmark, XGBoost achieved the lowest RMSE (1,130.03), MAE (910.50), and MAPE (13.45%). XGBoost also produced the lowest aggregate errors in rolling-origin validation. LightGBM and LSTM remained competitive on the fixed-holdout absolute-error metrics. The significance tests, however, did not establish significant differences among the non-ARIMA models after Holm correction.
 
-These findings illustrate why forecasting models should be selected based on measured performance and computational considerations rather than assumed superiority from model complexity alone.
-
-The resulting pipeline and interactive dashboard provide a foundation for understanding demand patterns, examining individual-store forecasts, and evaluating the accuracy–complexity trade-off in retail forecasting.
+The prediction-interval analysis also showed that nominal 95% intervals do not necessarily deliver 95% empirical coverage. Together, the results demonstrate the value of evaluating point accuracy, uncertainty, statistical evidence, and recorded runtime rather than assuming that model complexity alone determines forecasting quality. The findings are specific to the historical data, chosen store sample, evaluation design, and recorded runtime environment; further validation on newer or external data would be needed before making broader claims.
 
 ## 16. References
 
